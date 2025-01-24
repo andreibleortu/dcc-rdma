@@ -41,10 +41,6 @@
 #define MAX_INLINE_DATA 256
 #define MAX_SGE 4
 
-// Add these definitions
-#define DISCONNECT_MSG "DISCONNECT"
-#define DISCONNECT_MSG_LEN 10
-
 // Add error handling macros
 #define CHECK_NULL(ptr, msg) do { if (!(ptr)) { fprintf(stderr, "%s\n", msg); return RDMA_ERR_RESOURCE; } } while(0)
 
@@ -114,14 +110,10 @@ int run_server(rdma_mode_t mode);
 // Signal handling
 extern struct config_t *global_config;
 void signal_handler(int signo);
+void handle_disconnect(struct config_t *config);  // Add this declaration
 
 // Add helper function declaration
 rdma_status_t setup_rdma_connection(struct config_t *config, const char *server_name, 
                                   rdma_mode_t mode, struct qp_info_t *remote_info);
-
-// Add these function declarations
-void send_disconnect(struct config_t *config, struct qp_info_t *remote_info);
-void wait_for_disconnect(struct config_t *config);
-void handle_disconnect(struct config_t *config);
 
 #endif

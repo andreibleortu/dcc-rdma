@@ -48,22 +48,9 @@ static void cleanup_qp(struct config_t *config)
 	}
 }
 
-void handle_disconnect(struct config_t *config)
-{
-    if (config->qp) {
-        // Move QP to error state
-        struct ibv_qp_attr attr = {
-            .qp_state = IBV_QPS_ERR
-        };
-        ibv_modify_qp(config->qp, &attr, IBV_QP_STATE);
-    }
-}
-
 void cleanup_resources(struct config_t *config)
 {
 	if (!config) return;
-    
-    handle_disconnect(config);
     
 	if (config->qp)
 		cleanup_qp(config);  // Use the function here
@@ -443,28 +430,6 @@ void wait_completion(struct config_t *config)
 	}
 }
 
-void send_disconnect(struct config_t *config, struct qp_info_t *remote_info)
-{
-    DEBUG_LOG("Sending disconnect message");
-    DEBUG_LOG("Remote address: %lu, Remote key: %u", remote_info->addr, remote_info->rkey);
-    post_operation(config, OP_WRITE, DISCONNECT_MSG, remote_info, DISCONNECT_MSG_LEN);
-    wait_completion(config);
-}
-
-void wait_for_disconnect(struct config_t *config)
-{
-    DEBUG_LOG("Waiting for client disconnect");
-    post_receive(config);
-    struct ibv_wc wc;
-    while (ibv_poll_cq(config->cq, 1, &wc) == 0)
-        ;
-    
-    if (wc.status == IBV_WC_SUCCESS && 
-        strncmp(config->buf, DISCONNECT_MSG, DISCONNECT_MSG_LEN) == 0) {
-        DEBUG_LOG("Received disconnect message");
-    }
-}
-
 /*******************************************************************************
  * Signal Handling
  ******************************************************************************/
@@ -475,11 +440,22 @@ void signal_handler(int signo)
 {
     printf("\nCaught signal %d, cleaning up...\n", signo);
     if (global_config) {
-        handle_disconnect(global_config);
+        //handle_disconnect(global_config);
         cleanup_resources(global_config);
         global_config = NULL;
     }
     exit(0);
+}
+
+void handle_disconnect(struct config_t *config)
+{
+    if (!config) return;
+    
+    // Send a zero-length message to indicate disconnect
+    char empty_msg = 0;
+    if (config->sock_fd) {
+        write(config->sock_fd, &empty_msg, 1);
+    }
 }
 
 /*******************************************************************************
@@ -531,10 +507,6 @@ int run_server(rdma_mode_t mode)
             result = -1;
     }
     
-    // Skip the extra wait for LAMBDA
-    if (mode != MODE_LAMBDA) {
-        wait_for_disconnect(&config);
-    }
     cleanup_resources(&config);
     return result;
 }
@@ -567,8 +539,6 @@ int run_client(const char *server_name, rdma_mode_t mode)
             result = -1;
     }
     
-    // Send disconnect message before cleanup
-    send_disconnect(&config, &remote_info);
     cleanup_resources(&config);
     return result;
 }

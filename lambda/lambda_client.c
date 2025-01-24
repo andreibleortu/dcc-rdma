@@ -108,11 +108,8 @@ static void local_signal_handler(int signum)
 {
     (void)signum; // Silence unused parameter warning
     if (global_config) {
-        DEBUG_LOG("Sending disconnect on control QP");
-        post_operation(global_config, OP_SEND, DISCONNECT_MSG, NULL, DISCONNECT_MSG_LEN);
-        wait_completion(global_config);
+        exit(0);
     }
-    exit(0);
 }
 
 int lambda_run_client(const char *server_name)
@@ -146,7 +143,7 @@ int lambda_run_client(const char *server_name)
     // Example usage
     char *lib_path = "./libmyfunc.so";
     char *func_name = "process_data";
-    char input[] = "test input";
+    char input[] = "testee enaputt";
     char output[1024];
     size_t output_size;
 

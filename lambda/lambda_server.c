@@ -63,100 +63,94 @@ static void setup_lambda_qps(struct lambda_config *config) {
 
 static void lambda_server_loop(struct config_t *config)
 {
-	DEBUG_LOG("Entering lambda server loop");
+    DEBUG_LOG("Entering lambda server loop");
 
-	// Add persistent metadata storage
-	struct lambda_metadata meta_storage;
-	struct qp_info_t client_info;
+    // Add persistent metadata storage
+    struct lambda_metadata meta_storage;
+    struct qp_info_t client_info;
 
-	while (1) {
-		DEBUG_LOG("Waiting for function code...");
+    while (1) {
+        DEBUG_LOG("Waiting for function code...");
 
-		// First receive metadata
-		if (post_lambda_receive(config) != 0) {
-			ERROR_LOG("Failed to post receive for metadata");
-			break;
-		}
+        // First receive metadata
+        if (post_lambda_receive(config) != 0) {
+            ERROR_LOG("Failed to post receive for metadata");
+            break;
+        }
 
-		DEBUG_LOG("Waiting for metadata");
-		wait_completion(config);
+        DEBUG_LOG("Waiting for metadata");
+        wait_completion(config);
 
-		 // Add check for DISCONNECT
-		if (strncmp(config->buf, DISCONNECT_MSG, DISCONNECT_MSG_LEN) == 0) {
-			DEBUG_LOG("Received disconnect message, exiting server loop");
-			break;
-		}
+        // Copy metadata and client QP info
+        memcpy(&meta_storage, config->buf, sizeof(struct lambda_metadata));
+        memcpy(&client_info, config->buf + sizeof(struct lambda_metadata), sizeof(struct qp_info_t));
+        struct lambda_metadata *meta = &meta_storage;
 
-		// Copy metadata and client QP info
-		memcpy(&meta_storage, config->buf, sizeof(struct lambda_metadata));
-		memcpy(&client_info, config->buf + sizeof(struct lambda_metadata), sizeof(struct qp_info_t));
-		struct lambda_metadata *meta = &meta_storage;
+        // Validate metadata before proceeding
+        if (meta->code_size == 0 || meta->code_size > LAMBDA_MAX_CODE_SIZE) {
+            ERROR_LOG("Invalid metadata received: code_size=%zu", meta->code_size);
+            break;
+        }
 
-		// Validate metadata before proceeding
-		if (meta->code_size == 0 || meta->code_size > LAMBDA_MAX_CODE_SIZE) {
-			ERROR_LOG("Invalid metadata received: code_size=%zu", meta->code_size);
-			break;
-		}
+        DEBUG_LOG("Received metadata for function '%s', code_size: %zu, entry_offset: %lu",
+            meta->function_name[0] ? meta->function_name : "<unnamed>", meta->code_size, meta->entry_offset);
 
-		DEBUG_LOG("Received metadata for function '%s', code_size: %zu, entry_offset: %lu",
-			meta->function_name[0] ? meta->function_name : "<unnamed>", meta->code_size, meta->entry_offset);
+        // Wait for function code
+        if (post_lambda_receive(config) != 0) {
+            ERROR_LOG("Failed to post receive for function code");
+            break;
+        }
 
-		// Wait for function code
-		if (post_lambda_receive(config) != 0) {
-			ERROR_LOG("Failed to post receive for function code");
-			break;
-		}
+        DEBUG_LOG("Waiting for function code");
+        wait_completion(config);
 
-		DEBUG_LOG("Waiting for function code");
-		wait_completion(config);
+        // Copy received code to executable region using stored metadata
+        memcpy(server_regions.code_region, config->buf, meta->code_size);
+        DEBUG_LOG("Copied %zu bytes of code to executable region", meta->code_size);
 
-		// Copy received code to executable region using stored metadata
-		memcpy(server_regions.code_region, config->buf, meta->code_size);
-		DEBUG_LOG("Copied %zu bytes of code to executable region", meta->code_size);
+        // Post receive for input data
+        if (post_lambda_receive(config) != 0) {
+            ERROR_LOG("Failed to post receive for input data");
+            break;
+        }
 
-		// Post receive for input data
-		if (post_lambda_receive(config) != 0) {
-			ERROR_LOG("Failed to post receive for input data");
-			break;
-		}
+        DEBUG_LOG("Waiting for input data");
+        wait_completion(config);
 
-		DEBUG_LOG("Waiting for input data");
-		wait_completion(config);
+        // Validate entry offset using stored metadata
+        if (meta->entry_offset >= meta->code_size) {
+            ERROR_LOG("Invalid entry offset: %lu (code size: %zu)", meta->entry_offset, meta->code_size);
+            break;
+        }
 
-		// Validate entry offset using stored metadata
-		if (meta->entry_offset >= meta->code_size) {
-			ERROR_LOG("Invalid entry offset: %lu (code size: %zu)", meta->entry_offset, meta->code_size);
-			break;
-		}
+        // Execute function using stored metadata
+        lambda_fn func = (lambda_fn)(server_regions.code_region + meta->entry_offset);
+        DEBUG_LOG("Function address: %p", func);
 
-		// Execute function using stored metadata
-		lambda_fn func = (lambda_fn)(server_regions.code_region + meta->entry_offset);
-		DEBUG_LOG("Function address: %p", func);
+        size_t output_size;
+        DEBUG_LOG("Executing function...");
 
-		size_t output_size;
-		DEBUG_LOG("Executing function...");
+        int result = func(server_regions.input_region, meta->input_size, server_regions.output_region, &output_size);
 
-		int result = func(server_regions.input_region, meta->input_size, server_regions.output_region, &output_size);
+        DEBUG_LOG("Function execution complete. Result: %d, output_size: %zu", result, output_size);
 
-		DEBUG_LOG("Function execution complete. Result: %d, output_size: %zu", result, output_size);
+         // Instead of sending, we'll write the result directly to client's memory
+        char result_buf[MAX_BUFFER_SIZE];
+        *(int *)result_buf = result;
+        *(size_t *)(result_buf + sizeof(int)) = output_size;
 
-		 // Instead of sending, we'll write the result directly to client's memory
-		char result_buf[MAX_BUFFER_SIZE];
-		*(int *)result_buf = result;
-		*(size_t *)(result_buf + sizeof(int)) = output_size;
+        if (output_size > 0) {
+            size_t data_offset = sizeof(int) + sizeof(size_t);
+            size_t max_copy = MAX_BUFFER_SIZE - data_offset;
+            size_t bytes_to_copy = output_size < max_copy ? output_size : max_copy;
 
-		if (output_size > 0) {
-			size_t data_offset = sizeof(int) + sizeof(size_t);
-			size_t max_copy = MAX_BUFFER_SIZE - data_offset;
-			size_t bytes_to_copy = output_size < max_copy ? output_size : max_copy;
+            memcpy(result_buf + data_offset, server_regions.output_region, bytes_to_copy);
+        }
 
-			memcpy(result_buf + data_offset, server_regions.output_region, bytes_to_copy);
-		}
-
-		DEBUG_LOG("Writing result back to client memory at address %lu", client_info.addr);
-		post_lambda_write(config, result_buf, &client_info);
-		wait_completion(config);
-	}
+        DEBUG_LOG("Writing result back to client memory at address %lu", client_info.addr);
+        post_lambda_write(config, result_buf, &client_info);
+        wait_completion(config);
+    }
 }
 
 // Implement RDMA operations for lambda mode
@@ -180,25 +174,17 @@ int post_lambda_write(struct config_t *config, void *buf, struct qp_info_t *remo
 
 int lambda_run_server(void)
 {
-	DEBUG_LOG("Starting lambda server");
-	struct lambda_config config = {};
+    DEBUG_LOG("Starting lambda server");
+    struct lambda_config config = {};
 
-	setup_lambda_qps(&config);
-	setup_lambda_regions(&config.data_qp);  // Use data QP for regions
+    setup_lambda_qps(&config);
+    setup_lambda_regions(&config.data_qp);
 
-	// Set up signal handler
-	global_config = &config.data_qp;
-	signal(SIGINT, signal_handler);
-	signal(SIGTERM, signal_handler);
+    printf("Lambda Server ready.\n");
+    lambda_server_loop(&config.data_qp);
 
-	printf("Lambda Server ready.\n");
-	lambda_server_loop(&config.data_qp);    // Pass data QP for main operations
-
-	DEBUG_LOG("Waiting for disconnect on control QP");
-	wait_for_disconnect(&config.ctrl_qp);
-
-	DEBUG_LOG("Cleaning up resources");
-	cleanup_resources(&config.data_qp);
-	cleanup_resources(&config.ctrl_qp);
-	return 0;
+    DEBUG_LOG("Cleaning up resources");
+    cleanup_resources(&config.data_qp);
+    cleanup_resources(&config.ctrl_qp);
+    return 0;
 }
